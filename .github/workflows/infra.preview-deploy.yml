@@ -1,0 +1,139 @@
+name: "infra preview & deploy"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 10_infra/**
+      - .github/workflows/**
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-1
+  TF_VERSION: 1.2.8
+  TF_PROJECT: tastylog
+  TF_ENVIRONMENT: dev
+
+defaults:
+  run:
+    shell: bash
+    working-directory: "10_infra/"
+
+jobs:
+  preview:
+    name: "preview"
+    runs-on: ubuntu-latest
+    outputs:
+      TF_PLAN_EXITCODE: ${{  steps.plan.outputs.exitcode  }}
+    steps:
+      - name: CheckOut repository
+        uses: actions/checkout@v4
+      - name: SetUp terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{  env.TF_VERSION  }}
+      - name: Terraform format
+        run: |
+          terraform fmt -check
+      - name: Configure AWS Credential
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{  env.AWS_REGION  }}
+          role-to-assume: ${{  secrets.AWS_IAM_ROLE_ARN  }}
+      - name: Terraform init
+        run: |
+          terraform init -no-color
+      - name: Terraform Validate
+        run: |
+          terraform validate -no-color
+      - name: Terraform plan
+        id: plan
+        continue-on-error: true
+        run: |
+          terraform plan \
+            -var 'project=${{  env.TF_PROJECT  }}' \
+            -var 'environment=${{  env.TF_ENVIRONMENT  }}' \
+            -var 'username=${{  secrets.MYSQL_USERNAME  }}' \
+            -var 'password=${{  secrets.MYSQL_PASSWORD  }}' \
+            -input=false \
+            -no-color \
+            -detailed-exitcode
+      - name: Slack Notify
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ secrets.SLACK_CHANNEL_ID }}
+            text: "GitHub Action build result: ${{ job.status }}\n${{ github.event.pull_request.html_url || github.event.head_commit.url }}"
+            type: home
+            blocks:
+              - type: header
+                text:
+                  type: plain_text
+                  text: "request for approve"
+                  emoji: true
+              - type: section
+                text:
+                  type: mrkdwn
+                  text: "${{  github.server_url  }}/${{  github.repository  }}/actions/runs/${{  github.run_id  }}"
+  deploy:
+    name: "Deploy"
+    needs: preview
+    if: needs.preview.outputs.TF_PLAN_EXITCODE == 2
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - name: CheckOut repository
+        uses: actions/checkout@v4
+      - name: SetUp terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{  env.TF_VERSION  }}
+      - name: Terraform format
+        run: |
+          terraform fmt -check
+      - name: Configure AWS Credential
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{  env.AWS_REGION  }}
+          role-to-assume: ${{  secrets.AWS_IAM_ROLE_ARN  }}
+      - name: Terraform init
+        run: |
+          terraform init -no-color
+      - name: Terraform apply
+        id: apply
+        run: |
+          terraform apply \
+            -var 'project=${{  env.TF_PROJECT  }}' \
+            -var 'environment=${{  env.TF_ENVIRONMENT  }}' \
+            -var 'username=${{  secrets.MYSQL_USERNAME  }}' \
+            -var 'password=${{  secrets.MYSQL_PASSWORD  }}' \
+            -input=false \
+            -no-color \
+            -auto-approve
+      - name: Slack Notify
+        if: always()
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ secrets.SLACK_CHANNEL_ID }}
+            text: "GitHub Action build result: ${{ job.status }}\n${{ github.event.pull_request.html_url || github.event.head_commit.url }}"
+            type: home
+            blocks:
+              - type: header
+                text:
+                  type: plain_text
+                  text: "runnner finished: ${{  steps.apply.outcome  }}"
+                  emoji: true
+              - type: section
+                text:
+                  type: mrkdwn
+                  text: "${{  github.server_url  }}/${{  github.repository  }}/actions/runs/${{  github.run_id  }}"
